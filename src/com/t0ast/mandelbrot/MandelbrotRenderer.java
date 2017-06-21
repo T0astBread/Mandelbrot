@@ -19,12 +19,13 @@ import java.awt.event.ContainerEvent;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
 import java.awt.event.MouseWheelEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.awt.event.WindowListener;
 import java.awt.image.BufferedImage;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import javax.swing.SwingUtilities;
 
 /**
@@ -33,17 +34,24 @@ import javax.swing.SwingUtilities;
  */
 public class MandelbrotRenderer extends javax.swing.JPanel
 {
+
+    public static final boolean DEBUG = false;
+    public static final int NUMBER_OF_RENDERING_THREADS = 4;
+    public static final float RESOLUTION_SCALING = .25f;
+
     public static final Font ALT_FONT = new Font("Calibri", Font.BOLD, 24);
     public static final String ALT_TEXT = "Mandelbrot";
-    
+
     private MandelbrotMaths m;
     private BufferedImage renderedImage;
-    private float renderScale = 1;
-    private double zoom = 1, offsetInMandelbrotUnitsX, offsetInMandelbrotUnitsY, previousScaledValueX, previousScaledValueY;
+    private float renderScale = 2f;
+    private ImagePortionRenderer[] renderers;
+    private Thread[] renderingThreads;
+    private double zoom = 1, offsetX, offsetY;
     private boolean started, isClosing, drawCross;
     private WindowListener closeListener;
-    
-    private int mouseDragStartX, mouseDragStartY, offsetX, offsetY, previewOffsetX, previewOffsetY;
+
+    private int previewOffsetX, previewOffsetY;
 
     /**
      * Creates new form MandelbrotRenderer
@@ -53,7 +61,7 @@ public class MandelbrotRenderer extends javax.swing.JPanel
         initComponents();
         this.m = new MandelbrotMaths();
         m.setResolution(100);
-        
+
         setFocusable(true);
         requestFocusInWindow();
         addKeyListener(new KeyAdapter()
@@ -61,81 +69,91 @@ public class MandelbrotRenderer extends javax.swing.JPanel
             @Override
             public void keyPressed(KeyEvent e)
             {
+                switch(e.getKeyCode())
+                {
+                    case KeyEvent.VK_PLUS:
+                        zoom(-1);
+                        break;
+                    case KeyEvent.VK_MINUS:
+                        zoom(1);
+                }
+                
                 cntrlUpdate(e);
             }
 
             @Override
             public void keyReleased(KeyEvent e)
             {
+                double deltaOff = zoom / (e.isShiftDown() ? 200 : e.isAltDown() ? 10 : 20);
+                int rerender = 2;
+                switch(e.getKeyCode())
+                {
+                    case KeyEvent.VK_UP:
+                        MandelbrotRenderer.this.offsetY -= deltaOff;
+                        break;
+                    case KeyEvent.VK_DOWN:
+                        MandelbrotRenderer.this.offsetY += deltaOff;
+                        break;
+                    default:
+                        rerender--;
+                }
+                switch(e.getKeyCode())
+                {
+                    case KeyEvent.VK_LEFT:
+                        MandelbrotRenderer.this.offsetX -= deltaOff;
+                        break;
+                    case KeyEvent.VK_RIGHT:
+                        MandelbrotRenderer.this.offsetX += deltaOff;
+                        break;
+                    default:
+                        rerender--;
+                }
+                if(rerender > 0)
+                {
+                    rerender();
+                }
+
                 cntrlUpdate(e);
             }
-            
+
             private void cntrlUpdate(KeyEvent e)
             {
                 MandelbrotRenderer.this.drawCross = e.isControlDown();
                 repaint();
             }
         });
-        
-        addMouseListener(new MouseAdapter()
-        {
-            @Override
-            public void mousePressed(MouseEvent e)
-            {
-                setMouseDragStartX(e.getX());
-                setMouseDragStartY(e.getY());
-            }
 
-            @Override
-            public void mouseReleased(MouseEvent e)
-            {
-                setOffsetX(mouseDragStartX - previewOffsetX + offsetX);
-                setOffsetY(mouseDragStartY - previewOffsetY + offsetY);
-                setPreviewOffsetX(0);
-                setPreviewOffsetY(0);
-                setMouseDragStartX(0);
-                setMouseDragStartY(0);
-                fullRender();
-            }
-        });
-        
-        addMouseMotionListener(new MouseAdapter()
-        {
-            @Override
-            public void mouseDragged(MouseEvent e)
-            {
-                setPreviewOffsetX(e.getX());
-                setPreviewOffsetY(e.getY());
-                repaint();
-            }
-        });
-        
         addMouseWheelListener(new MouseAdapter()
         {
             @Override
             public void mouseWheelMoved(MouseWheelEvent e)
             {
-                setZoom(getZoom() + e.getPreciseWheelRotation() * getZoom()/10f);
-                fullRender();
+                zoom(e.getPreciseWheelRotation());
             }
         });
-        
+
         addComponentListener(new ComponentAdapter()
         {
             @Override
             public void componentResized(ComponentEvent e)
             {
-                if(MandelbrotRenderer.this.started) fullRender();
+                if(MandelbrotRenderer.this.started)
+                {
+                    fullRender();
+                }
             }
         });
-        
+
         addContainerListener(new ContainerAdapter()
         {
             @Override
             public void componentAdded(ContainerEvent e)
             {
                 Window w = SwingUtilities.getWindowAncestor(MandelbrotRenderer.this);
-                if(w == null) return;
+                if(w == null)
+                {
+                    return;
+                }
                 w.addWindowListener(MandelbrotRenderer.this.closeListener = new WindowAdapter()
                 {
                     @Override
@@ -150,30 +168,27 @@ public class MandelbrotRenderer extends javax.swing.JPanel
             public void componentRemoved(ContainerEvent e)
             {
                 Window w = SwingUtilities.getWindowAncestor(MandelbrotRenderer.this);
-                if(w == null) return;
+                if(w == null)
+                {
+                    return;
+                }
                 w.removeWindowListener(MandelbrotRenderer.this.closeListener);
             }
         });
+
+        this.renderers = new ImagePortionRenderer[NUMBER_OF_RENDERING_THREADS];
+        for(int i = 0; i < NUMBER_OF_RENDERING_THREADS; i++)
+        {
+            this.renderers[i] = new ImagePortionRenderer();
+        }
+        this.renderingThreads = new Thread[NUMBER_OF_RENDERING_THREADS];
     }
 
-    private int getMouseDragStartX()
+    private void zoom(double amount)
     {
-        return mouseDragStartX;
-    }
-
-    private void setMouseDragStartX(int mouseDragStartX)
-    {
-        this.mouseDragStartX = mouseDragStartX;
-    }
-
-    private int getMouseDragStartY()
-    {
-        return mouseDragStartY;
-    }
-
-    private void setMouseDragStartY(int mouseDragStartY)
-    {
-        this.mouseDragStartY = mouseDragStartY;
+        setZoom(getZoom() + amount * getZoom() / 10f);
+        this.m.setResolution((int) (100/Math.pow(getZoom(), RESOLUTION_SCALING)));
+        fullRender();
     }
 
     public float getRenderScale()
@@ -186,34 +201,24 @@ public class MandelbrotRenderer extends javax.swing.JPanel
         this.renderScale = renderScale;
     }
 
-    public int getOffsetX()
+    public double getOffsetX()
     {
         return offsetX;
     }
 
-    public void setOffsetX(int offsetX)
+    public void setOffsetX(double offsetX)
     {
         this.offsetX = offsetX;
     }
 
-    public int getOffsetY()
+    public double getOffsetY()
     {
         return offsetY;
     }
 
-    public void setOffsetY(int offsetY)
+    public void setOffsetY(double offsetY)
     {
         this.offsetY = offsetY;
-    }
-
-    private void setPreviewOffsetX(int previewOffsetX)
-    {
-        this.previewOffsetX = previewOffsetX;
-    }
-
-    private void setPreviewOffsetY(int previewOffsetY)
-    {
-        this.previewOffsetY = previewOffsetY;
     }
 
     public double getZoom()
@@ -223,24 +228,9 @@ public class MandelbrotRenderer extends javax.swing.JPanel
 
     public void setZoom(double zoom)
     {
-//        this.offsetInMandelbrotUnitsX = 0;
-//        this.offsetInMandelbrotUnitsY = 0;
-        updateMiddleValues();
-        double oldZoom = this.zoom;
         this.zoom = zoom;
-        double prevX = this.previousScaledValueX, prevY = this.previousScaledValueY;
-        updateMiddleValues();
-        this.offsetInMandelbrotUnitsX = prevX - this.previousScaledValueX * zoom;
-        this.offsetInMandelbrotUnitsY = prevY - this.previousScaledValueY * zoom;
     }
-    
-    private void updateMiddleValues()
-    {
-        int w = getWidth(), h = getHeight();
-        scaleX(w, w/2);
-        scaleY(h, h/2);
-    }
-    
+
     public void start()
     {
         this.started = true;
@@ -255,79 +245,144 @@ public class MandelbrotRenderer extends javax.swing.JPanel
             paintComponentAlt(g);
             return;
         }
-        
+
         g.setColor(Color.WHITE);
         g.fillRect(0, 0, getWidth(), getHeight());
         g.drawImage(this.renderScale == 1 ? this.renderedImage : this.renderedImage.getScaledInstance(getWidth(), getHeight(), Image.SCALE_FAST),
-        this.previewOffsetX - this.mouseDragStartX, this.previewOffsetY - this.mouseDragStartY, this);
-        
+        0, 0, this);
+
         if(this.drawCross)
         {
             g.setColor(Color.RED);
-            g.drawLine(getWidth()/2, getHeight()/2 - 10, getWidth()/2, getHeight()/2 + 10);
-            g.drawLine(getWidth()/2 - 10, getHeight()/2, getWidth()/2 + 10, getHeight()/2);
+            g.drawLine(getWidth() / 2, getHeight() / 2 - 10, getWidth() / 2, getHeight() / 2 + 10);
+            g.drawLine(getWidth() / 2 - 10, getHeight() / 2, getWidth() / 2 + 10, getHeight() / 2);
         }
     }
-    
+
     private void paintComponentAlt(Graphics g)
     {
         g.setColor(getBackground());
         g.fillRect(0, 0, getWidth(), getHeight());
-        
+
         FontMetrics fm = g.getFontMetrics(ALT_FONT);
         g.setFont(ALT_FONT);
         g.setColor(ColorUtils.getContrastBW(getBackground()));
         g.drawString(ALT_TEXT,
-        (int) (getWidth()/2 - fm.charsWidth(ALT_TEXT.toCharArray(), 0, ALT_TEXT.length())/2),
-        (int) (getHeight()/2 + ALT_FONT.getSize()/2));
+        (int) (getWidth() / 2 - fm.charsWidth(ALT_TEXT.toCharArray(), 0, ALT_TEXT.length()) / 2),
+        (int) (getHeight() / 2 + ALT_FONT.getSize() / 2));
     }
-    
+
     public void rerender()
     {
-        this.renderedImage = new BufferedImage((int) (getWidth()/this.renderScale), (int) (getHeight()/this.renderScale), BufferedImage.TYPE_INT_RGB);
-        for(int i = 0; i < this.renderedImage.getWidth(); i++)
+        long timeAtStart = 0;
+        if(DEBUG)
         {
-            for(int j = 0; j < this.renderedImage.getHeight(); j++)
+            timeAtStart = System.currentTimeMillis();
+        }
+
+        this.renderedImage = new BufferedImage((int) (getWidth() / this.renderScale), (int) (getHeight() / this.renderScale), BufferedImage.TYPE_INT_RGB);
+//        renderPortion(this.renderedImage, 0, 0, this.renderedImage.getWidth(), this.renderedImage.getHeight());
+
+        int renderersOnXSide = 2, renderersOnYSide = NUMBER_OF_RENDERING_THREADS / 2;
+        int segmentWidth = this.renderedImage.getWidth() / renderersOnXSide,
+        segmentHeight = this.renderedImage.getHeight() / renderersOnYSide;
+        int counter = 0;
+        for(int i = 0; i < renderersOnXSide; i++)
+        {
+            for(int j = 0; j < renderersOnYSide; j++)
+            {
+                int x0 = i * segmentWidth, y0 = j * segmentHeight;
+                this.renderers[counter].setValues(this.renderedImage,
+                x0, y0, x0 + segmentWidth, y0 + segmentHeight);
+                this.renderingThreads[counter] = new Thread(this.renderers[counter]);
+                this.renderingThreads[counter].start();
+                counter++;
+            }
+        }
+        for(Thread renderingThread : this.renderingThreads)
+        {
+            try
+            {
+                renderingThread.join();
+            }
+            catch(InterruptedException ex)
+            {
+                Logger.getLogger(MandelbrotRenderer.class.getName()).log(Level.SEVERE, null, ex);
+            }
+        }
+
+        if(DEBUG)
+        {
+            System.out.println("Render time: " + Math.abs(System.currentTimeMillis() - timeAtStart) + "ms");
+        }
+    }
+
+    private void renderPortion(BufferedImage img, int x0, int y0, int x1, int y1)
+    {
+        for(int i = x0; i < x1; i++)
+        {
+            for(int j = y0; j < y1; j++)
             {
                 int steps = checkM(this.renderedImage, i, j);
-                this.renderedImage.setRGB(i, j, steps == -1 ? Color.BLACK.getRGB() : createRGB(steps));
+                img.setRGB(i, j, steps == -1 ? Color.BLACK.getRGB() : createRGB(steps));
+                if(DEBUG && (i == x0 || j == y0 || i == x1 || j == y1))
+                {
+                    img.setRGB(i, j, Color.GREEN.getRGB());
+                }
             }
         }
     }
-    
+
     public void fullRender()
     {
         rerender();
         repaint();
     }
-    
+
     private int checkM(BufferedImage img, int x, int y)
     {
         return m.bailoutSteps(scaleX(img.getWidth(), x), scaleY(img.getHeight(), y));
     }
-    
+
     private double scaleX(int imgWidth, int x)
     {
-        double sx = this.previousScaledValueX = ((x + this.offsetX) * 1d/imgWidth * 3.5 - 2.5), sxz = sx * this.zoom;
-        return sxz + this.offsetInMandelbrotUnitsX;
-//        double offX = this.offsetX * 1d/img.getWidth() * 3.5;
-//        double sx = (x * 1d/img.getWidth() * 3.5 - 2.5), sxz = sx * this.zoom;
-//        return sxz + offX;
+        double sx = x * 1d / imgWidth * 3.5 - 2.5, sxz = sx * this.zoom;
+        return sxz + this.offsetX;
     }
-    
+
     private double scaleY(int imgHeight, int y)
     {
-        double sy = this.previousScaledValueY = ((y + this.offsetY) * 1d/imgHeight * 2 - 1), syz = sy * this.zoom;
-        return syz + this.offsetInMandelbrotUnitsY;
-//        double offY = this.offsetY * 1d/img.getHeight() * 2;
-//        double sy = (y * 1d/img.getHeight() * 2 - 1), syz = sy * this.zoom;
-//        return syz + offY;
+        double sy = y * 1d / imgHeight * 2 - 1, syz = sy * this.zoom;
+        return syz + this.offsetY;
     }
-    
+
     private int createRGB(int bailoutSteps)
     {
-        float col = bailoutSteps*1f/this.m.getResolution();
+        float col = bailoutSteps * 1f / this.m.getResolution();
         return new Color(1 - col, 1 - col, 1 - col).getRGB();
+    }
+
+    class ImagePortionRenderer implements Runnable
+    {
+
+        private BufferedImage img;
+        private int x0, x1, y0, y1;
+
+        public ImagePortionRenderer setValues(BufferedImage img, int x0, int y0, int x1, int y1)
+        {
+            this.img = img;
+            this.x0 = x0;
+            this.y0 = y0;
+            this.x1 = x1;
+            this.y1 = y1;
+            return this;
+        }
+
+        @Override
+        public void run()
+        {
+            renderPortion(this.img, this.x0, this.y0, this.x1, this.y1);
+        }
     }
 
     /**
