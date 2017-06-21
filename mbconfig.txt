@@ -1,0 +1,6 @@
+{
+	"debug": true,
+	"nrOfRenderingThreads": 4,
+	"resolutionScaling": .25,
+	"renderScale": 1
+}
