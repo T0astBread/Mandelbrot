@@ -37,14 +37,14 @@ public class MandelbrotRenderer extends javax.swing.JPanel
 
     public static final boolean DEBUG = false;
     public static final int NUMBER_OF_RENDERING_THREADS = 4;
-    public static final float RESOLUTION_SCALING = .25f;
+    public static final float RESOLUTION_SCALING = .5f;
 
     public static final Font ALT_FONT = new Font("Calibri", Font.BOLD, 24);
     public static final String ALT_TEXT = "Mandelbrot";
 
     private MandelbrotMaths m;
     private BufferedImage renderedImage;
-    private float renderScale = 2f;
+    private float renderScale = 1;
     private ImagePortionRenderer[] renderers;
     private Thread[] renderingThreads;
     private double zoom = 1, offsetX, offsetY;
@@ -114,6 +114,15 @@ public class MandelbrotRenderer extends javax.swing.JPanel
                 }
 
                 cntrlUpdate(e);
+            }
+
+            @Override
+            public void keyTyped(KeyEvent e)
+            {
+                if(e.getKeyCode() == KeyEvent.VK_TAB)
+                {
+                    MandelbrotRenderer.this.renderScale = renderScale == 1 ? .25f : 1;
+                }
             }
 
             private void cntrlUpdate(KeyEvent e)
@@ -359,7 +368,7 @@ public class MandelbrotRenderer extends javax.swing.JPanel
     private int createRGB(int bailoutSteps)
     {
         float col = bailoutSteps * 1f / this.m.getResolution();
-        return new Color(1 - col, 1 - col, 1 - col).getRGB();
+        return new Color(col, col, col).getRGB();
     }
 
     class ImagePortionRenderer implements Runnable
